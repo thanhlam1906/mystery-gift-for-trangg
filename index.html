@@ -44,7 +44,7 @@ button:focus-visible{outline:2px solid var(--amber);outline-offset:3px}
 
 /* Intro: film-title card in the lower third */
 .intro{display:flex;flex-direction:column;justify-content:flex-end;
-  background:linear-gradient(to top,rgba(18,15,28,.92) 0%,rgba(18,15,28,.55) 42%,rgba(18,15,28,.08) 78%,rgba(18,15,28,0) 100%)}
+  background:linear-gradient(to top,rgba(18,15,28,.88) 0%,rgba(18,15,28,.5) 28%,rgba(18,15,28,.12) 52%,rgba(18,15,28,0) 70%)}
 .intro-inner{max-width:34rem;display:flex;flex-direction:column;align-items:flex-start;gap:14px;padding-bottom:8px}
 .eyebrow{margin:0;font-size:12px;letter-spacing:.32em;text-transform:uppercase;color:var(--amber);font-weight:500}
 .intro h1{margin:0;font-family:var(--font-hand);font-weight:700;font-size:clamp(46px,11vw,92px);line-height:1;color:var(--mist);
@@ -314,6 +314,25 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
+
+/* ---------- drifting cloud shadows, shared by every sunlit surface ---------- */
+const CLOUD = { x: 0, y: 0.5 };   // x = time, y = strength (plain object, so every material shares it)
+const GLSL_CLOUD = `
+uniform vec2 uCloud;
+float cs_h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float cs_n(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+  return mix(mix(cs_h(i), cs_h(i+vec2(1.0,0.0)), f.x), mix(cs_h(i+vec2(0.0,1.0)), cs_h(i+vec2(1.0,1.0)), f.x), f.y); }
+float cloudShade(vec2 p){
+  vec2 q = p * 0.0105 + vec2(0.94, 0.33) * uCloud.x * 0.035;
+  float n = cs_n(q) * 0.66 + cs_n(q * 2.3 + 4.1) * 0.34;
+  return 1.0 - uCloud.y * smoothstep(0.52, 0.72, n);
+}`;
+THREE.ShaderChunk.lights_pars_begin = GLSL_CLOUD + '\n' + THREE.ShaderChunk.lights_pars_begin;
+THREE.ShaderChunk.lights_fragment_begin = THREE.ShaderChunk.lights_fragment_begin
+  .replace('GeometricContext geometry;', '#ifdef STANDARD\nfloat csCloud = cloudShade(((vec4(-vViewPosition, 0.0) * viewMatrix).xyz + cameraPosition).xz);\n#else\nfloat csCloud = 1.0;\n#endif\nGeometricContext geometry;')
+  .replace('getDirectionalDirectLightIrradiance( directionalLight, geometry, directLight );', 'getDirectionalDirectLightIrradiance( directionalLight, geometry, directLight );\n\t\tdirectLight.color *= csCloud;');
+THREE.ShaderLib.physical.uniforms.uCloud = { value: CLOUD };
+THREE.ShaderLib.standard.uniforms.uCloud = { value: CLOUD };
 scene.fog = new THREE.Fog(0xffd39b, 40, 240);
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.05, 1400);
 camera.rotation.order = 'YXZ';
@@ -683,11 +702,22 @@ function drawMask(){
   mg.fillStyle = 'rgb(0,255,0)';
   mg.fillRect(toPx(-5), toPx(HOUSE.z - 4.6), 10 * PX, (FRONT_Z + 2.9 - (HOUSE.z - 4.6)) * PX);
   for (const t of TREES){ mg.beginPath(); mg.arc(toPx(t[0]), toPx(t[1]), 1.3 * t[2] * PX, 0, Math.PI * 2); mg.fill(); }
+  // red = ground contact shading (only when the name isn't planted in the field)
+  if (!CONFIG.nameInField){
+    const ring = (x0, z0, x1, z1, grow, a) => { for (let k = 0; k < 12; k++){ const e = grow * k / 11; mg.fillStyle = `rgba(255,0,0,${a})`; mg.beginPath(); mg.rect(toPx(x0 - e), toPx(z0 - e), (x1 - x0 + 2 * e) * PX, (z1 - z0 + 2 * e) * PX); mg.fill(); } };
+    ring(HOUSE.x - 3.65, HOUSE.z - 2.9, HOUSE.x + 3.65, HOUSE.z + 2.9, 1.5, 0.05);
+    ring(HOUSE.x - 2.3, FRONT_Z, HOUSE.x + 2.3, FRONT_Z + 2.1, 1.0, 0.045);
+    for (const t of TREES){
+      const r = 1.9 * t[2] * 1.15, cx = toPx(t[0]), cz = toPx(t[1]), gr = mg.createRadialGradient(cx, cz, 0, cx, cz, r * PX);
+      gr.addColorStop(0, 'rgba(255,0,0,0.75)'); gr.addColorStop(0.35, 'rgba(255,0,0,0.38)'); gr.addColorStop(1, 'rgba(255,0,0,0)');
+      mg.fillStyle = gr; mg.beginPath(); mg.arc(cx, cz, r * PX, 0, Math.PI * 2); mg.fill();
+    }
+  }
   maskTex.needsUpdate = true;
   maskData = mg.getImageData(0, 0, MASK_SIZE, MASK_SIZE).data;
 }
 function isNameAt(x, z){
-  if (!maskData) return false;
+  if (!maskData || !CONFIG.nameInField) return false;
   const px = Math.floor(toPx(x)), pz = Math.floor(toPx(z));
   if (px < 0 || pz < 0 || px >= MASK_SIZE || pz >= MASK_SIZE) return false;
   return maskData[(pz * MASK_SIZE + px) * 4] > 127;
@@ -725,7 +755,8 @@ const U = {
   uTile: { value: TILE }, uFieldR: { value: FIELD_R }, uWind: { value: 1 },
   uNameGlow: { value: 0 }, uPetalTint: { value: col3(PR.petal) }, uNameTint: { value: col3(PR.name) },
   uNameGlowColor: { value: col3(PR.glow) }, uStemColor: { value: col3(PR.stemC) },
-  uNearFade: { value: 1 }, uNearR: { value: TILE * 0.36 }, uNameReveal: { value: 0 }, uOpen: { value: 0.08 }, uHideR: { value: 0 }
+  uNearFade: { value: 1 }, uNearR: { value: TILE * 0.36 }, uNameReveal: { value: 0 }, uOpen: { value: 0.08 }, uHideR: { value: 0 },
+  uCloud: { value: CLOUD }
 };
 (PR.stripes || [PR.petal, PR.petal, PR.petal, PR.petal, PR.petal]).forEach((c, i) => { U['uC' + i] = { value: col3(c) }; });
 
@@ -736,7 +767,7 @@ const SH_VS_MAIN = `
   vec3 transformedNormal = normalize((viewMatrix * vec4(nrmW, 0.0)).xyz);
   #include <shadowmap_vertex>
 `;
-const SH_FS_PARS = '#include <common>\n#include <packing>\nuniform bool receiveShadow;\n#include <shadowmap_pars_fragment>\n#include <shadowmask_pars_fragment>\n';
+const SH_FS_PARS = '#include <common>\n#include <packing>\nuniform bool receiveShadow;\n#include <shadowmap_pars_fragment>\n#include <shadowmask_pars_fragment>\n' + GLSL_CLOUD + '\n';
 const GLSL_FOG = `
 vec3 applyFog(vec3 col, vec3 wpos){
   vec3 v = wpos - cameraPosition; float d = length(v);
@@ -775,7 +806,7 @@ attribute vec2 aOffset;
 attribute vec4 aRand;
 attribute float aExtra;
 attribute float aPart;
-uniform float uTime, uTile, uFieldR, uHeadScale, uNearR, uNearFade, uBloom, uWind, uNameBoost, uNameReveal, uHideR;
+uniform float uTime, uTile, uTile2, uFieldR, uHeadScale, uNearR, uNearFade, uBloom, uWind, uNameBoost, uNameReveal, uHideR;
 uniform vec2 uCenter, uStemRange, uHeadRange, uTiltRange;
 uniform vec3 uPlayer, uPetalTint, uNameTint, uPathTint;
 uniform sampler2D uMask;
@@ -791,10 +822,14 @@ varying float vName;
 varying vec3 vWorld;
 varying float vShade;
 varying vec3 vTint;
+varying float vAO;
 void main(){
   vec2 wp = aOffset;
   #ifdef NEAR
   wp = uCenter + mod(aOffset - uCenter + 0.5*uTile, uTile) - 0.5*uTile;
+  #endif
+  #ifdef MID2
+  wp = uCenter + mod(aOffset - uCenter + 0.5*uTile2, uTile2) - 0.5*uTile2;
   #endif
   vec4 m = texture2D(uMask, (wp + 80.0) / 160.0);
   float sc = 1.0 - smoothstep(uFieldR - 6.0, uFieldR, length(wp));
@@ -804,12 +839,19 @@ void main(){
   float pick = 0.06 + 0.88 * fract(aRand.x * 91.7 + aRand.w * 13.3);
   sc *= smoothstep(pick - 0.03, pick + 0.03, 1.0 - smoothstep(uTile*0.34, uTile*0.47, length(wp - uCenter))) * uNearFade;
   #endif
+  #ifdef MID2
+  float pick2 = 0.06 + 0.88 * fract(aRand.x * 91.7 + aRand.w * 13.3);
+  float dm = length(wp - uCenter);
+  float band2 = smoothstep(uTile*0.34, uTile*0.47, dm) * (1.0 - smoothstep(uNearR - 2.0, uNearR + 3.0, dm));
+  sc *= smoothstep(pick2 - 0.03, pick2 + 0.03, band2) * uNearFade;
+  #endif
   #ifdef FAR
   float pickF = 0.06 + 0.88 * fract(aRand.x * 91.7 + aRand.w * 13.3);
   sc *= smoothstep(pickF - 0.03, pickF + 0.03, smoothstep(uNearR, uNearR + 5.0, length(wp - uCenter)));
   if (aExtra > 1.5) sc *= uNameReveal;
   #endif
-  float isName = step(0.5, m.r);
+  float isName = step(0.5, m.r) * step(0.001, uNameReveal);
+  vAO = 1.0 - 0.45 * m.r;
   #ifdef PATH
   float bl = clamp((uBloom - aExtra) * 5.0, 0.0, 1.0);
   sc = bl * (1.0 + 0.25*sin(bl*3.14159));
@@ -906,9 +948,10 @@ varying float vName;
 varying vec3 vWorld;
 varying float vShade;
 varying vec3 vTint;
+varying float vAO;
 ` + GLSL_FOG + `
 void main(){
-  float sh = getShadowMask();
+  float sh = getShadowMask() * cloudShade(vWorld.xz);
   vec3 sunC = uSunColor * sh;
   vec3 V = normalize(vWorld - cameraPosition);
   float back = pow(max(dot(V, uSunDir), 0.0), 3.0);
@@ -944,6 +987,7 @@ void main(){
     col += uPathTint * uPathGlow * (0.75 * petal + 0.2);
     #endif
   }
+  col *= vAO;
   col = applyFog(col, vWorld);
   gl_FragColor = vec4(col, 1.0);
 }`;
@@ -1073,6 +1117,27 @@ const pathMat = flowerMaterial('PATH', {
 });
 const pathMesh = new THREE.Mesh(pathGeo, pathMat); pathMesh.frustumCulled = false; pathMesh.receiveShadow = true; scene.add(pathMesh);
 
+// long-range detail (laptops/desktops): a dense ring of real-size tulips from ~12 m out to ~40 m,
+// and close-up tulips out to 15 m. The frame-rate check turns this off if the machine can't keep up.
+const ULTRA = { on: !isCoarse && IS_TULIP };
+const MID2_TILE = 84;
+let mid2 = null;
+if (ULTRA.on){
+  const n = Math.round(MID2_TILE * MID2_TILE * (window.__DHTM_LITE ? 2.5 : 10));
+  const g = instancedFrom(FAR_BASE, n), off = new Float32Array(n * 2), rnd = new Float32Array(n * 4), ex = new Float32Array(n);
+  for (let i = 0; i < n; i++){ off[i*2] = R() * MID2_TILE; off[i*2+1] = R() * MID2_TILE; for (let k = 0; k < 4; k++) rnd[i*4+k] = R(); ex[i] = R(); }
+  g.setAttribute('aOffset', new THREE.InstancedBufferAttribute(off, 2));
+  g.setAttribute('aRand', new THREE.InstancedBufferAttribute(rnd, 4));
+  g.setAttribute('aExtra', new THREE.InstancedBufferAttribute(ex, 1));
+  mid2 = new THREE.Mesh(g, flowerMaterial('MID2', { uTile2: { value: MID2_TILE } }));
+  mid2.frustumCulled = false; mid2.receiveShadow = true; scene.add(mid2);
+}
+function setUltra(on){
+  ULTRA.on = on && !!mid2;
+  if (mid2) mid2.visible = ULTRA.on;
+  if (hdField) hdField.cx = 1e9;
+}
+
 /* ---------- grass: two wrap-around layers of curved, shadowed blades ---------- */
 const GRASS_VS = SH_VS_PARS + GLSL_TERRAIN + GLSL_NOISE + `
 attribute vec2 aOffset;
@@ -1088,6 +1153,7 @@ varying vec3 vN;
 varying vec2 vBlade;
 varying float vVar;
 varying float vDry;
+varying float vAO;
 void main(){
   vec2 wp = uCenter + mod(aOffset - uCenter + 0.5*uGT, uGT) - 0.5*uGT;
   float dc = length(wp - uCenter);
@@ -1124,7 +1190,7 @@ void main(){
   vec3 T = normalize(vec3(bd.x * sin(a), cos(a), bd.y * sin(a)));
   vec3 nrmW = normalize(cross(side, T));
   nrmW = normalize(nrmW + side * position.x * 0.5);
-  vWorld = world; vN = nrmW; vBlade = vec2(position.x, v);
+  vWorld = world; vN = nrmW; vBlade = vec2(position.x, v); vAO = 1.0 - 0.5 * m.r;
   vVar = mix(aRand.w, noise(wp * 0.07), 0.55);
   vDry = step(0.92, hash(aOffset * 7.13));
 ` + SH_VS_MAIN + `
@@ -1138,6 +1204,7 @@ varying vec3 vN;
 varying vec2 vBlade;
 varying float vVar;
 varying float vDry;
+varying float vAO;
 ` + GLSL_FOG + `
 void main(){
   float v = vBlade.y;
@@ -1149,7 +1216,7 @@ void main(){
   vec3 alb = mix(base, tip, smoothstep(0.1, 1.0, v));
   alb = mix(alb, vec3(0.58, 0.5, 0.3) * (0.8 + 0.4 * vVar), vDry);
   alb *= 0.88 + 0.2 * (1.0 - abs(vBlade.x));
-  vec3 sunC = uSunColor * getShadowMask();
+  vec3 sunC = uSunColor * getShadowMask() * cloudShade(vWorld.xz);
   float ndl = dot(N, L);
   float diff = max(ndl, 0.0) * 0.6 + 0.4 * clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
   float scat = pow(max(dot(-V, L), 0.0), 3.0);
@@ -1159,6 +1226,7 @@ void main(){
   vec3 col = alb * uAmbient * ao * (0.85 + 0.3 * max(N.y, 0.0));
   col += alb * sunC * (diff * mix(0.55, 1.0, ao) + trans * vec3(0.95, 1.0, 0.5));
   col += sunC * spec;
+  col *= vAO;
   gl_FragColor = vec4(applyFog(col, vWorld), 1.0);
 }`;
 function grassLayer(count, cfg){
@@ -1186,7 +1254,7 @@ const GCFG = isCoarse
 const grassIn = grassLayer(Q.grassIn, GCFG.inner), grassOut = grassLayer(Q.grassOut, GCFG.outer);
 
 /* ---------- close-up tulips: cupped petals, folded leaves, round stems ---------- */
-const HD_HIDE = isCoarse ? 7.6 : 11.6, HD_FIN = isCoarse ? 8 : 12;   // close-up tulips reach further in the finale view
+const HD_HIDE = isCoarse ? 7.6 : 11.6, HD_FIN = isCoarse ? 8 : 12, HD_ULTRA = 15;   // close-up tulips reach further in the finale view
 function hdTulipGeo(){
   const pos = [], uv = [], part = [], idx = [];
   const V = (x, y, z, u, v, pt) => { pos.push(x, y, z); uv.push(u, v); part.push(pt); };
@@ -1255,18 +1323,25 @@ varying vec2 vUv;
 varying float vPart;
 varying vec3 vTint;
 varying float vHf;
+varying float vAO;
 void main(){
   vec2 wp = aOffset;
+  vAO = 1.0;
   #ifndef PATH
   wp = uCenter + mod(aOffset - uCenter + 0.5*uTile, uTile) - 0.5*uTile;
   #endif
   float sc = 1.0 - step(uHideR, length(wp - uCenter));
+  #ifndef PATH
+  { float pk = 0.06 + 0.88 * fract(aRand.x * 91.7 + aRand.w * 13.3);
+    sc *= smoothstep(pk - 0.03, pk + 0.03, 1.0 - smoothstep(uTile*0.34, uTile*0.47, length(wp - uCenter))); }
+  #endif
   #ifdef PATH
   float bl = clamp((uBloom - aExtra) * 5.0, 0.0, 1.0);
   sc *= bl * (1.0 + 0.25*sin(bl*3.14159));
   vTint = uPathTint;
   #else
   vec4 m = texture2D(uMask, (wp + 80.0) / 160.0);
+  vAO = 1.0 - 0.45 * m.r;
   sc *= 1.0 - smoothstep(uFieldR - 6.0, uFieldR, length(wp));
   sc *= 1.0 - step(0.5, m.g);
   sc *= 1.0 - smoothstep(0.3, 0.62, m.b);
@@ -1319,13 +1394,14 @@ varying vec2 vUv;
 varying float vPart;
 varying vec3 vTint;
 varying float vHf;
+varying float vAO;
 ` + GLSL_FOG + `
 void main(){
   vec3 N = normalize(vN);
   vec3 V = normalize(cameraPosition - vWorld);
   vec3 L = uSunDir;
   vec3 Hh = normalize(L + V);
-  vec3 sunC = uSunColor * getShadowMask();
+  vec3 sunC = uSunColor * getShadowMask() * cloudShade(vWorld.xz);
   vec3 col;
   if (vPart < 0.5) {
     float ndl = dot(N, L);
@@ -1360,6 +1436,7 @@ void main(){
     float ao = mix(0.4, 1.0, smoothstep(0.0, 0.55, vUv.y));
     col = alb * (uAmbient * ao + sunC * diff) + alb * sunC * trans * vec3(0.9, 1.0, 0.6) + sunC * spec * vec3(0.85, 0.95, 1.0);
   }
+  col *= vAO;
   gl_FragColor = vec4(applyFog(col, vWorld), 1.0);
 }`;
 let hdField = null, hdPath = null;
@@ -1373,7 +1450,7 @@ if (IS_TULIP){
     }, extra || {})),
     vertexShader: HD_VS, fragmentShader: HD_FS
   });
-  const n = Math.ceil(Math.PI * (HD_FIN + 2) * (HD_FIN + 2) * Q.near / (TILE * TILE) * 1.3);
+  const hmax = Math.max(HD_FIN, ULTRA.on ? HD_ULTRA : 0), n = Math.ceil(Math.PI * (hmax + 2) * (hmax + 2) * Q.near / (TILE * TILE) * 1.3);
   const g = instancedFrom(HD_BASE, 0);
   const off = new Float32Array(n * 2), rnd = new Float32Array(n * 4), ex = new Float32Array(n);
   g.setAttribute('aOffset', new THREE.InstancedBufferAttribute(off, 2));
@@ -1396,7 +1473,7 @@ function updateHD(){
   if (Math.hypot(cx - h.cx, cz - h.cz) < 0.6) return;
   h.cx = cx; h.cz = cz;
   const so = nearGeo.attributes.aOffset.array, sr = nearGeo.attributes.aRand.array, se = nearGeo.attributes.aExtra.array, lim = nearGeo.instanceCount;
-  const R2 = U.uHideR.value + 1.2, wrap = v => ((v % TILE) + TILE) % TILE;
+  const R2 = Math.min(U.uHideR.value + 1.2, (TILE - 4) / 2), wrap = v => ((v % TILE) + TILE) % TILE;
   let n = 0;
   for (let dx = Math.floor(-R2 - 1); dx <= R2 + 1; dx++) for (let dz = Math.floor(-R2 - 1); dz <= R2 + 1; dz++){
     if (Math.hypot(dx, dz) > R2 + 1.5) continue;
@@ -1432,14 +1509,14 @@ vec3 groundColor(vec3 p){
   if (sk > 2.5) sc = uC3;
   if (sk > 3.5) sc = uC4;
   float camD = length(p.xz - cameraPosition.xz);
-  col = mix(col, sc * (0.55 + 0.25*n), (1.0 - smoothstep(66.0, 72.0, r)) * smoothstep(6.0, 26.0, camD) * 0.33);
+  col = mix(col, sc * (0.6 + 0.25*n), (1.0 - smoothstep(66.0, 72.0, r)) * max(smoothstep(6.0, 26.0, camD), smoothstep(4.0, 9.0, cameraPosition.y - p.y)) * mix(0.33, 0.62, max(smoothstep(25.0, 70.0, camD), smoothstep(5.0, 10.0, cameraPosition.y - p.y))));
   #endif
   vec4 m = texture2D(uMask, (p.xz + 80.0) / 160.0);
   float dirt = max(m.g * 0.85, smoothstep(0.18, 0.75, m.b + (n2 - 0.5) * 0.3));
   vec3 dirtC = mix(vec3(0.4, 0.31, 0.21), vec3(0.56, 0.46, 0.33), noise(p.xz*1.7)) * (0.82 + 0.3*noise(p.xz*9.0));
   dirtC *= 1.0 - 0.16 * smoothstep(0.88, 1.0, m.b) * (0.5 + 0.5*noise(p.xz*vec2(0.6, 4.0)));
   dirtC = mix(dirtC, vec3(0.62, 0.6, 0.55), step(0.93, noise(p.xz*14.0)) * 0.6 * dirt);
-  return mix(col, dirtC, dirt);
+  return mix(col, dirtC, dirt) * (1.0 - 0.42 * m.r);
 }
 float groundDirt(vec3 p){
   vec4 m = texture2D(uMask, (p.xz + 80.0) / 160.0);
@@ -2570,12 +2647,12 @@ function chimePan(){
 /* =====================================================================
    STAGE TRANSITIONS
    ===================================================================== */
-const INTRO_POS = new THREE.Vector3(0, 34, 94), INTRO_LOOK = new THREE.Vector3(0, 6, 10);
+const INTRO_POS = new THREE.Vector3(0, 10, 68), INTRO_LOOK = new THREE.Vector3(0, 0.5, 34);   // low over the field, flowers readable
 function startDescend(){
   setStage('descend');
   S.pos.set(START.x, 0, START.y); S.yaw = 0; S.pitch = -0.04;
   const gy = terrainH(START.x, START.y) + EYE;
-  S.descCurve = new THREE.CatmullRomCurve3([INTRO_POS.clone(), new THREE.Vector3(0, 16, 74), new THREE.Vector3(0, gy + 1.4, 53), new THREE.Vector3(START.x, gy, START.y)], false, 'centripetal');
+  S.descCurve = new THREE.CatmullRomCurve3([INTRO_POS.clone(), new THREE.Vector3(0, 6.5, 60), new THREE.Vector3(0, gy + 1.4, 53), new THREE.Vector3(START.x, gy, START.y)], false, 'centripetal');
   S.eyeY = gy;
 }
 function startExplore(){
@@ -2770,16 +2847,18 @@ function updateFinale(dt){
 function updateCommon(dt){
   // camera height above ground drives LOD + fog
   const camH = Math.max(0, camera.position.y - terrainH(camera.position.x, camera.position.z));
-  const hi = smooth(6, 16, camH);
+  const hi = smooth(14, 26, camH);
   U.uNearFade.value = 1 - hi;
-  U.uNearR.value = TILE * 0.36 * (1 - hi);
+  U.uNearR.value = (ULTRA.on ? 36 : TILE * 0.36) * (1 - hi);
   farMat.uniforms.uHeadScale.value = lerp(FAR_HS, 3.3, smooth(8, 40, camH));
   U.uCenter.value.set(camera.position.x, camera.position.z);
-  if (S.stage === 'finale'){   // nothing behind is seen: centre the detailed layers ahead of the view
+  // when nothing behind is seen, centre the detailed layers ahead of the view
+  const ahead = S.stage === 'finale' ? 11 : S.stage === 'intro' ? 13 : S.stage === 'descend' ? 13 * (1 - smooth(0, 1, S.stageT / (reduceMotion ? 2.5 : 7))) : 0;
+  if (ahead > 0.01){
     camera.getWorldDirection(tmpV2); tmpV2.y = 0;
-    if (tmpV2.lengthSq() > 1e-6){ tmpV2.normalize(); U.uCenter.value.x += tmpV2.x * 11; U.uCenter.value.y += tmpV2.z * 11; }
+    if (tmpV2.lengthSq() > 1e-6){ tmpV2.normalize(); U.uCenter.value.x += tmpV2.x * ahead; U.uCenter.value.y += tmpV2.z * ahead; }
   }
-  if (hdField && hdField.on){ const want = S.stage === 'finale' ? HD_FIN : HD_HIDE; if (U.uHideR.value !== want){ U.uHideR.value = want; hdField.cx = 1e9; } }
+  if (hdField && hdField.on){ const want = ULTRA.on ? HD_ULTRA : S.stage === 'finale' ? HD_FIN : HD_HIDE; if (U.uHideR.value !== want){ U.uHideR.value = want; hdField.cx = 1e9; } }
   updateHD();
   const walkingStage = S.stage === 'explore' || S.stage === 'enter' || S.stage === 'descend';
   if (walkingStage) U.uPlayer.value.set(camera.position.x, 0, camera.position.z); else U.uPlayer.value.set(9999, 0, 9999);
@@ -2901,8 +2980,10 @@ const PERF = { t: 0, n: 0, level: 0, wait: 3 };
 function setDpr(v){ renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, v)); resize(); }
 function setShadowSize(n){ if (sunLight.shadow.mapSize.x > n){ sunLight.shadow.mapSize.set(n, n); if (sunLight.shadow.map){ sunLight.shadow.map.dispose(); sunLight.shadow.map = null; } } }
 const LEVELS = [
+  () => { VOL.on = false; if (gradePass) gradePass.uniforms.uRays.value = 0; },
+  () => { setUltra(false); },
   () => { grassOut.geo.instanceCount = Math.floor(grassOut.count * 0.6); setDpr(Math.min(Q.dpr, 1.5)); },
-  () => { grassIn.geo.instanceCount = Math.floor(grassIn.count * 0.65); if (gradePass) gradePass.uniforms.uRays.value = 0; },
+  () => { grassIn.geo.instanceCount = Math.floor(grassIn.count * 0.65); },
   () => { nearGeo.instanceCount = Math.floor(nearGeo.instanceCount * 0.7); if (hdField) hdField.cx = 1e9; grassOut.mesh.receiveShadow = false; setDpr(1.25); },
   () => { if (bloomPass) bloomPass.enabled = false; setShadowSize(1024); setDpr(1); },
   () => { if (hdField){ hdField.on = false; hdField.mesh.visible = false; hdPath.mesh.visible = false; } U.uHideR.value = 0; grassIn.geo.instanceCount = Math.floor(grassIn.count * 0.4); grassOut.geo.instanceCount = Math.floor(grassOut.count * 0.35); setShadowSize(512); }
@@ -2943,20 +3024,68 @@ function updateWorld(dt){
     const facing = U.uSunDir.value.dot(tmpV2);
     gu.uShaft.value = front ? smooth(0.05, 0.75, facing) * smooth(-2, 6, ENV.elev) * (inside ? 0.35 : 1) : 0;
     gu.uTime.value = S.time;
+    // eye adaptation: the view brightens slowly indoors and settles again outside
+    gu.uExposure.value = lerp(gu.uExposure.value, inside ? 1.24 : 1.04, 1 - Math.exp(-dt * 1.1));
+    const volOn = VOL.ok && VOL.on && !!sunLight.shadow.map;
+    gu.uVolOn.value = volOn ? 1 : 0;
+    if (volOn){
+      gu.tShadow.value = sunLight.shadow.map.texture;
+      gu.uSunW.value.copy(U.uSunDir.value); gu.uSunC.value.copy(U.uSunColor.value);
+      gu.uVol.value = lerp(gu.uVol.value, inside ? 0.05 : 0.006, 1 - Math.exp(-dt * 2));
+    }
   }
 }
 const GradeShader = {
-  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uSunScreen: { value: new THREE.Vector2(0.5, 0.5) }, uSunVis: { value: 0 }, uShaft: { value: 0 }, uRays: { value: 1 }, uExposure: { value: 1.04 }, uVignette: { value: 0.32 }, uRes: { value: new THREE.Vector2(1, 1) } },
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uSunScreen: { value: new THREE.Vector2(0.5, 0.5) }, uSunVis: { value: 0 }, uShaft: { value: 0 }, uRays: { value: 1 },
+    tDepth: { value: null }, tShadow: { value: null }, uShadowM: { value: new THREE.Matrix4() }, uInvProj: { value: new THREE.Matrix4() }, uCamW: { value: new THREE.Matrix4() }, uCamPos: { value: new THREE.Vector3() },
+    uSunW: { value: new THREE.Vector3(0, 1, 0) }, uSunC: { value: new THREE.Color() }, uVol: { value: 0.006 }, uVolOn: { value: 0 }, uExposure: { value: 1.04 }, uVignette: { value: 0.32 }, uRes: { value: new THREE.Vector2(1, 1) } },
   vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
   fragmentShader: `
-uniform sampler2D tDiffuse;
-uniform float uTime, uSunVis, uShaft, uRays, uExposure, uVignette;
+#include <packing>
+uniform sampler2D tDiffuse, tDepth, tShadow;
+uniform float uTime, uSunVis, uShaft, uRays, uExposure, uVignette, uVol, uVolOn;
 uniform vec2 uSunScreen, uRes;
+uniform mat4 uShadowM, uInvProj, uCamW;
+uniform vec3 uCamPos, uSunW, uSunC;
 varying vec2 vUv;
 float h21(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+float ign(vec2 p){ return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+// light scattered by the air along each view ray, darkened wherever the sun's shadow map says the air is shaded
+vec3 volumetric(vec2 uv){
+  float d = texture2D(tDepth, uv).x;
+  vec4 vp = uInvProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+  vp.xyz /= vp.w;
+  float dist = d > 0.99999 ? 1e4 : length(vp.xyz);
+  vec3 rd = normalize((uCamW * vec4(vp.xyz, 0.0)).xyz);
+  float L = min(dist, 42.0), stepL = L / 14.0;
+  float t = stepL * ign(gl_FragCoord.xy + fract(uTime * 7.0) * 61.0), lit = 0.0;
+  for (int i = 0; i < 14; i++){
+    vec4 sc = uShadowM * vec4(uCamPos + rd * t, 1.0);
+    float v = 1.0;
+    if (sc.x > 0.0 && sc.x < 1.0 && sc.y > 0.0 && sc.y < 1.0 && sc.z < 1.0) v = step(sc.z - 0.0015, unpackRGBAToDepth(texture2D(tShadow, sc.xy)));
+    lit += v; t += stepL;
+  }
+  float mu = dot(rd, uSunW), g = 0.6;
+  float phase = (1.0 - g*g) / pow(1.0 + g*g - 2.0*g*mu, 1.5) / 12.566 * 3.0 + 0.08;
+  return uSunC * (lit / 14.0) * phase * (1.0 - exp(-uVol * L)) * 0.28;
+}
 vec3 shoulder(vec3 c){ vec3 hi = 0.8 + 0.2 * (1.0 - exp(-(c - 0.8) / 0.2)); return mix(c, hi, step(0.8, c)); }
 void main(){
   vec3 col = texture2D(tDiffuse, vUv).rgb;
+  if (uVolOn > 0.5) col += volumetric(vUv);
+  if (uSunVis > 0.001){   // faint lens ghosts opposite the sun, like a real camera
+    vec2 sv = uSunScreen - 0.5;
+    float asp = uRes.x / uRes.y;
+    vec3 fl = vec3(0.0);
+    for (int k = 0; k < 4; k++){
+      float fk = float(k);
+      vec2 gp = 0.5 - sv * (0.35 + 0.42 * fk);
+      float r = length((vUv - gp) * vec2(asp, 1.0)), sz = 0.018 + 0.022 * fk;
+      vec3 tint = fk < 0.5 ? vec3(1.0, 0.85, 0.6) : fk < 1.5 ? vec3(0.7, 0.9, 1.0) : fk < 2.5 ? vec3(1.0, 0.7, 0.8) : vec3(0.8, 1.0, 0.8);
+      fl += tint * (1.0 - smoothstep(sz * 0.75, sz, r)) * (0.55 + 0.45 * smoothstep(0.0, sz, r));
+    }
+    col += fl * 0.03 * uSunVis;
+  }
   if (uRays > 0.5 && uSunVis > 0.001){
     vec2 stepv = (uSunScreen - vUv) / 30.0;
     vec2 uv = vUv + stepv * h21(vUv * uRes + fract(uTime) * 17.0);
@@ -2990,12 +3119,16 @@ void main(){
 }`
 };
 let composer = null, bloomPass = null, gradePass = null;
+const VOL = { ok: false, on: true };
 if (THREE.EffectComposer && THREE.RenderPass && THREE.ShaderPass && THREE.UnrealBloomPass){
   try {
     const gl2 = renderer.capabilities.isWebGL2;
     const opts = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: gl2 ? THREE.HalfFloatType : THREE.UnsignedByteType };
     let rt;
-    if (gl2 && THREE.WebGLMultisampleRenderTarget){ rt = new THREE.WebGLMultisampleRenderTarget(innerWidth, innerHeight, opts); rt.samples = isCoarse ? 2 : 4; }
+    if (gl2 && THREE.WebGLMultisampleRenderTarget){
+      rt = new THREE.WebGLMultisampleRenderTarget(innerWidth, innerHeight, opts); rt.samples = isCoarse ? 2 : 4;
+      if (THREE.DepthTexture){ rt.depthTexture = new THREE.DepthTexture(innerWidth, innerHeight); rt.depthTexture.type = THREE.UnsignedIntType; VOL.ok = true; }
+    }
     else rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight, opts);
     composer = new THREE.EffectComposer(renderer, rt);
     composer.addPass(new THREE.RenderPass(scene, camera));
@@ -3003,7 +3136,8 @@ if (THREE.EffectComposer && THREE.RenderPass && THREE.ShaderPass && THREE.Unreal
     composer.addPass(bloomPass);
     gradePass = new THREE.ShaderPass(GradeShader);
     composer.addPass(gradePass);
-  } catch (e) { composer = null; bloomPass = null; gradePass = null; }
+    if (VOL.ok){ const gu = gradePass.uniforms; gu.tDepth.value = rt.depthTexture; gu.uShadowM.value = sunLight.shadow.matrix; gu.uInvProj.value = camera.projectionMatrixInverse; gu.uCamW.value = camera.matrixWorld; gu.uCamPos.value = camera.position; }
+  } catch (e) { composer = null; bloomPass = null; gradePass = null; VOL.ok = false; }
 }
 function resize(){
   renderer.setSize(innerWidth, innerHeight);
@@ -3025,7 +3159,7 @@ if (document.fonts && document.fonts.load){
 let last = performance.now();
 function frame(now){
   const raw = (now - last) / 1000, dt = Math.min(0.05, raw); last = now;
-  S.time += dt; S.stageT += dt; U.uTime.value = S.time;
+  S.time += dt; S.stageT += dt; U.uTime.value = S.time; CLOUD.x = S.time;
   update(dt);
   if (composer) composer.render(dt); else renderer.render(scene, camera);
   perfTick(raw);
